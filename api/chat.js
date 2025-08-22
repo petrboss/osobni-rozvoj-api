@@ -1,65 +1,72 @@
-// /api/chat.js – Vercel serverless function (Node)
-// Produční verze s CORS + napojením na OpenAI Chat Completions
+// api/chat.js
+import OpenAI from "openai";
+
+// Domeny, ze kterych povolime volani API (pridej si dalsi, kdyz bude treba)
+const ALLOWED_ORIGINS = [
+  "https://petrboss.github.io",
+  "http://localhost:3000",
+  "http://127.0.0.1:3000",
+];
+
+function setCorsHeaders(res, origin) {
+  if (ALLOWED_ORIGINS.includes(origin)) {
+    res.setHeader("Access-Control-Allow-Origin", origin);
+  } else {
+    // defaultne povol jen produkcni GitHub Pages
+    res.setHeader("Access-Control-Allow-Origin", "https://petrboss.github.io");
+  }
+  res.setHeader("Vary", "Origin");
+  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+}
 
 export default async function handler(req, res) {
-  // 🔐 Povol přesně tvůj frontend (GitHub Pages)
-  const ORIGIN = 'https://petrboss.github.io';
-  res.setHeader('Access-Control-Allow-Origin', ORIGIN);
-  res.setHeader('Access-Control-Allow-Methods', 'POST,OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
-  // (nevracej credentials, nepotřebujeme je)
-  // res.setHeader('Access-Control-Allow-Credentials', 'true');
+  const origin = req.headers.origin || "";
+  setCorsHeaders(res, origin);
 
-  // ✅ Preflight (musí být 200 + CORS hlavičky)
-  if (req.method === 'OPTIONS') return res.status(200).end();
+  // CORS preflight
+  if (req.method === "OPTIONS") {
+    return res.status(200).end();
+  }
 
-  if (req.method !== 'POST') {
-    return res.status(405).json({ error: 'Method not allowed' });
+  if (req.method !== "POST") {
+    return res.status(405).json({ error: "Method not allowed" });
   }
 
   try {
-    // Bezpečné/paranoidní načtení body (kdyby nebyl parsovaný)
-    let body = req.body;
-    if (!body) {
-      body = await new Promise((resolve, reject) => {
-        try {
-          let data = '';
-          req.on('data', c => data += c);
-          req.on('end', () => resolve(data ? JSON.parse(data) : {}));
-        } catch (e) { reject(e); }
-      });
+    const { messages } = req.body || {};
+    if (!Array.isArray(messages) || messages.length === 0) {
+      return res.status(400).json({ error: "Missing messages[]" });
     }
 
-    const { messages } = body || {};
-    if (!Array.isArray(messages)) {
-      return res.status(400).json({ error: 'messages[] required' });
+    const apiKey = process.env.OPENAI_API_KEY;
+
+    // Fallback, kdyz chybi klic - backend jede, ale neni nastaveny OPENAI_API_KEY
+    if (!apiKey) {
+      const reply =
+        "Backend běží ✅, ale chybí OPENAI_API_KEY. Přidej ho ve Vercel → Settings → Environment Variables a potom redeploy.";
+      return res.status(200).json({ reply, _dummy: true });
     }
 
-    // 🔑 OpenAI klíč musí být ve Vercelu jako env var OPENAI_API_KEY
-    const r = await fetch('https://api.openai.com/v1/chat/completions', {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${process.env.OPENAI_API_KEY}`,
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({
-        model: 'gpt-4o-mini',
-        temperature: 0.6,
-        messages: [
-          { role: 'system', content: 'Jsi trenér osobního rozvoje. Odpovídej česky, stručně a věcně.' },
-          ...messages
-        ]
-      })
+    const openai = new OpenAI({ apiKey });
+
+    // levný a rychlý model
+    const completion = await openai.chat.completions.create({
+      model: "gpt-4o-mini",
+      messages, // [{role:'user', content:'...'}]
     });
 
-    if (!r.ok) {
-      return res.status(500).json({ error: 'Upstream error', detail: await r.text() });
-    }
-
-    const data = await r.json();
-    const text = data?.choices?.[0]?.message?.content ?? '';
-    return res.status(200).json({ reply: text });
-  } catch (e) {
-    return res.status(500).json({ error: e?.message || 'Unknown error' });
+    const reply = completion.choices?.[0]?.message?.content?.trim() || "";
+    return res.status(200).json({ reply });
+  } catch (err) {
+    console.error("API /api/chat error:", err);
+    return res.status(500).json({ error: "Upstream error" });
   }
 }
+
+// (volitelné) necháme default bodyParser zapnutý, Vercel JSON už parsuje
+export const config = {
+  api: {
+    bodyParser: true,
+  },
+};
